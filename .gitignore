@@ -9,3 +9,4 @@ confxml.h
 *.obj
 *.so
 *.rcc
+Vesc_Tool.app

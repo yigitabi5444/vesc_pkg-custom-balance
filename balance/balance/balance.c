@@ -296,7 +296,7 @@ static float get_setpoint_adjustment_step_size(data *d)
 static bool check_faults(data *d, bool ignoreTimers)
 {
 	// Check for balance effect multiplier
-	if(d->balance_effect_multiplier==0)
+	if (d->balance_effect_multiplier == 0)
 	{
 		return false;
 	}
@@ -990,18 +990,26 @@ static void balance_thd(void *arg)
 	}
 }
 
-static bool can_eid_callback(uint32_t id, uint8_t *data, uint8_t len)
+static bool can_eid_callback(uint32_t id, uint8_t *can_data, uint8_t len)
 {
 	data *d = (data *)ARG;
+	static const int throttle_type = 0x01;
+	static const int balance_effect_multiplier_type = 0x02;
 
-	//First 4 bytes are the external throttle value as a float
-	//next 4 bytes are the balance effect multiplier as a float
 	if (id == d->other_vesc_id)
 	{
-		if (len == 8)
+		if (len == 5)
 		{
-			memcpy(&d->external_throttle, data, 4);
-			memcpy(&d->balance_effect_multiplier, data + 4, 4);
+			int32_t int_val = can_data[1] << 24 | can_data[2] << 16 | can_data[3] << 8 | can_data[4];
+			float float_val = int_val / 1000.0;
+			if (can_data[0] == throttle_type)
+			{
+				d->external_throttle = float_val;
+			}
+			else if (can_data[0] == balance_effect_multiplier_type)
+			{
+				d->balance_effect_multiplier = float_val;
+			}
 			return true;
 		}
 	}

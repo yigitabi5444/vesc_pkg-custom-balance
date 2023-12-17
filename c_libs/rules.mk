@@ -36,7 +36,7 @@ CFLAGS = -fpic -Os -Wall -Wextra -Wundef -std=gnu99 -I$(VESC_C_LIB_PATH)
 CFLAGS += -I$(STLIB_PATH)/CMSIS/include -I$(STLIB_PATH)/CMSIS/ST -I$(UTILS_PATH)/
 CFLAGS += -fomit-frame-pointer -falign-functions=16 -mthumb
 CFLAGS += -fsingle-precision-constant -Wdouble-promotion
-CFLAGS += -mfloat-abi=hard -mfpu=fpv4-sp-d16 -mcpu=cortex-m4
+CFLAGS += -mfpu=fpv4-sp-d16 -mcpu=cortex-m4
 CFLAGS += -fdata-sections -ffunction-sections
 CFLAGS += -DIS_VESC_LIB
 CFLAGS += $(USE_OPT)
