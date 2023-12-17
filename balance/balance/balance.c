@@ -1,21 +1,21 @@
 /*
-    Copyright 2019 - 2022 Mitch Lustig
+	Copyright 2019 - 2022 Mitch Lustig
 	Copyright 2022 Benjamin Vedder	benjamin@vedder.se
 
 	This file is part of the VESC firmware.
 
 	The VESC firmware is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    The VESC firmware is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	The VESC firmware is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include "vesc_c_if.h"
@@ -31,17 +31,18 @@
 HEADER
 
 // Can
-#define MAX_CAN_AGE		0.1
-#define MAX_CAN_DEVS	2
+#define MAX_CAN_AGE 0.1
+#define MAX_CAN_DEVS 2
 
 // Return the sign of the argument. -1.0 if negative, 1.0 if zero or positive.
-#define SIGN(x)				(((x) < 0.0) ? -1.0 : 1.0)
+#define SIGN(x) (((x) < 0.0) ? -1.0 : 1.0)
 
-#define DEG2RAD_f(deg)		((deg) * (float)(M_PI / 180.0))
-#define RAD2DEG_f(rad) 		((rad) * (float)(180.0 / M_PI))
+#define DEG2RAD_f(deg) ((deg) * (float)(M_PI / 180.0))
+#define RAD2DEG_f(rad) ((rad) * (float)(180.0 / M_PI))
 
 // Data type (Value 5 was removed, and can be reused at a later date, but i wanted to preserve the current value's numbers for UIs)
-typedef enum {
+typedef enum
+{
 	STARTUP = 0,
 	RUNNING = 1,
 	RUNNING_TILTBACK_DUTY = 2,
@@ -55,7 +56,8 @@ typedef enum {
 	FAULT_STARTUP = 11
 } BalanceState;
 
-typedef enum {
+typedef enum
+{
 	CENTERING = 0,
 	TILTBACK_DUTY,
 	TILTBACK_HV,
@@ -63,18 +65,21 @@ typedef enum {
 	TILTBACK_NONE
 } SetpointAdjustmentType;
 
-typedef enum {
+typedef enum
+{
 	OFF = 0,
 	HALF,
 	ON
 } SwitchState;
 
-typedef struct{
+typedef struct
+{
 	float a0, a1, a2, b1, b2;
 	float z1, z2;
 } Biquad;
 
-typedef enum {
+typedef enum
+{
 	BQ_LOWPASS,
 	BQ_HIGHPASS
 } BiquadType;
@@ -84,7 +89,8 @@ typedef enum {
 // in flash without virtual memory in RAM (as all RAM already is dedicated to the
 // main firmware and managed from there). This is probably the main limitation of
 // loading applications in runtime, but it is not too bad to work around.
-typedef struct {
+typedef struct
+{
 	lib_thread thread; // Balance Thread
 
 	balance_config balance_conf;
@@ -105,6 +111,9 @@ typedef struct {
 	float motor_position;
 	float adc1, adc2;
 	SwitchState switch_state;
+	float balance_effect_multiplier; // Multiplier for the balance effect
+	float external_throttle;		 // 0.0 = no throttle, 1.0 = Max throttle
+	int other_vesc_id;
 
 	// Rumtime state values
 	BalanceState state;
@@ -136,23 +145,27 @@ static void set_current(data *d, float current, float yaw_current);
 static void configure(data *d);
 
 // Utility Functions
-static float biquad_process(Biquad *biquad, float in) {
-    float out = in * biquad->a0 + biquad->z1;
-    biquad->z1 = in * biquad->a1 + biquad->z2 - biquad->b1 * out;
-    biquad->z2 = in * biquad->a2 - biquad->b2 * out;
-    return out;
+static float biquad_process(Biquad *biquad, float in)
+{
+	float out = in * biquad->a0 + biquad->z1;
+	biquad->z1 = in * biquad->a1 + biquad->z2 - biquad->b1 * out;
+	biquad->z2 = in * biquad->a2 - biquad->b2 * out;
+	return out;
 }
 
-static void biquad_config(Biquad *biquad, BiquadType type, float Fc) {
-	float K = tanf(M_PI * Fc);	// -0.0159;
-	float Q = 0.707; // maximum sharpness (0.5 = maximum smoothness)
+static void biquad_config(Biquad *biquad, BiquadType type, float Fc)
+{
+	float K = tanf(M_PI * Fc); // -0.0159;
+	float Q = 0.707;		   // maximum sharpness (0.5 = maximum smoothness)
 	float norm = 1 / (1 + K / Q + K * K);
-	if (type == BQ_LOWPASS) {
+	if (type == BQ_LOWPASS)
+	{
 		biquad->a0 = K * K * norm;
 		biquad->a1 = 2 * biquad->a0;
 		biquad->a2 = biquad->a0;
 	}
-	else if (type == BQ_HIGHPASS) {
+	else if (type == BQ_HIGHPASS)
+	{
 		biquad->a0 = 1 * norm;
 		biquad->a1 = -2 * biquad->a0;
 		biquad->a2 = biquad->a0;
@@ -161,12 +174,14 @@ static void biquad_config(Biquad *biquad, BiquadType type, float Fc) {
 	biquad->b2 = (1 - K / Q + K * K) * norm;
 }
 
-static void biquad_reset(Biquad *biquad) {
+static void biquad_reset(Biquad *biquad)
+{
 	biquad->z1 = 0;
 	biquad->z2 = 0;
 }
 
-static void configure(data *d) {
+static void configure(data *d)
+{
 	// Set calculated values from config
 	d->loop_time_seconds = 1.0 / d->balance_conf.hertz;
 
@@ -183,34 +198,40 @@ static void configure(data *d) {
 	d->noseangling_step_size = d->balance_conf.noseangling_speed / d->balance_conf.hertz;
 
 	// Init Filters
-	if (d->balance_conf.loop_time_filter > 0) {
+	if (d->balance_conf.loop_time_filter > 0)
+	{
 		d->loop_overshoot_alpha = 2.0 * M_PI * ((float)1.0 / (float)d->balance_conf.hertz) *
-				(float)d->balance_conf.loop_time_filter / (2.0 * M_PI * (1.0 / (float)d->balance_conf.hertz) *
-						(float)d->balance_conf.loop_time_filter + 1.0);
+								  (float)d->balance_conf.loop_time_filter / (2.0 * M_PI * (1.0 / (float)d->balance_conf.hertz) * (float)d->balance_conf.loop_time_filter + 1.0);
 	}
 
-	if (d->balance_conf.kd_pt1_lowpass_frequency > 0) {
+	if (d->balance_conf.kd_pt1_lowpass_frequency > 0)
+	{
 		float dT = 1.0 / d->balance_conf.hertz;
-		float RC = 1.0 / ( 2.0 * M_PI * d->balance_conf.kd_pt1_lowpass_frequency);
-		d->d_pt1_lowpass_k =  dT / (RC + dT);
+		float RC = 1.0 / (2.0 * M_PI * d->balance_conf.kd_pt1_lowpass_frequency);
+		d->d_pt1_lowpass_k = dT / (RC + dT);
 	}
 
-	if (d->balance_conf.kd_pt1_highpass_frequency > 0) {
+	if (d->balance_conf.kd_pt1_highpass_frequency > 0)
+	{
 		float dT = 1.0 / d->balance_conf.hertz;
-		float RC = 1.0 / ( 2.0 * M_PI * d->balance_conf.kd_pt1_highpass_frequency);
-		d->d_pt1_highpass_k =  dT / (RC + dT);
+		float RC = 1.0 / (2.0 * M_PI * d->balance_conf.kd_pt1_highpass_frequency);
+		d->d_pt1_highpass_k = dT / (RC + dT);
 	}
 
-	if (d->balance_conf.torquetilt_filter > 0) { // Torquetilt Current Biquad
+	if (d->balance_conf.torquetilt_filter > 0)
+	{ // Torquetilt Current Biquad
 		float Fc = d->balance_conf.torquetilt_filter / d->balance_conf.hertz;
 		biquad_config(&d->torquetilt_current_biquad, BQ_LOWPASS, Fc);
 	}
 
 	// Variable nose angle adjustment / tiltback (setting is per 1000erpm, convert to per erpm)
 	d->tiltback_variable = d->balance_conf.tiltback_variable / 1000;
-	if (d->tiltback_variable > 0) {
+	if (d->tiltback_variable > 0)
+	{
 		d->tiltback_variable_max_erpm = fabsf(d->balance_conf.tiltback_variable_max / d->tiltback_variable);
-	} else {
+	}
+	else
+	{
 		d->tiltback_variable_max_erpm = 100000;
 	}
 
@@ -219,7 +240,8 @@ static void configure(data *d) {
 	d->filtered_loop_overshoot = 0.0;
 }
 
-static void reset_vars(data *d) {
+static void reset_vars(data *d)
+{
 	// Clear accumulated values.
 	d->integral = 0;
 	d->last_proportional = 0;
@@ -246,165 +268,239 @@ static void reset_vars(data *d) {
 	d->last_time = 0;
 	d->diff_time = 0;
 	d->brake_timeout = 0;
+	d->other_vesc_id = -1;
+	d->external_throttle = 0;
+	d->balance_effect_multiplier = 1.0;
 }
 
-static float get_setpoint_adjustment_step_size(data *d) {
-	switch(d->setpointAdjustmentType){
-		case (CENTERING):
-			return d->startup_step_size;
-		case (TILTBACK_DUTY):
-			return d->tiltback_duty_step_size;
-		case (TILTBACK_HV):
-			return d->tiltback_hv_step_size;
-		case (TILTBACK_LV):
-			return d->tiltback_lv_step_size;
-		case (TILTBACK_NONE):
-			return d->tiltback_return_step_size;
-		default:
-			;
+static float get_setpoint_adjustment_step_size(data *d)
+{
+	switch (d->setpointAdjustmentType)
+	{
+	case (CENTERING):
+		return d->startup_step_size;
+	case (TILTBACK_DUTY):
+		return d->tiltback_duty_step_size;
+	case (TILTBACK_HV):
+		return d->tiltback_hv_step_size;
+	case (TILTBACK_LV):
+		return d->tiltback_lv_step_size;
+	case (TILTBACK_NONE):
+		return d->tiltback_return_step_size;
+	default:;
 	}
 	return 0;
 }
 
 // Fault checking order does not really matter. From a UX perspective, switch should be before angle.
-static bool check_faults(data *d, bool ignoreTimers){
+static bool check_faults(data *d, bool ignoreTimers)
+{
+	// Check for balance effect multiplier
+	if(d->balance_effect_multiplier==0)
+	{
+		return false;
+	}
+
 	// Check switch
 	// Switch fully open
-	if (d->switch_state == OFF) {
-		if((1000.0 * (d->current_time - d->fault_switch_timer)) > d->balance_conf.fault_delay_switch_full || ignoreTimers){
-			d->state = FAULT_SWITCH_FULL;
-			return true;
-		}
-	} else {
-		d->fault_switch_timer = d->current_time;
-	}
+	// if (d->switch_state == OFF)
+	// {
+	// 	if ((1000.0 * (d->current_time - d->fault_switch_timer)) > d->balance_conf.fault_delay_switch_full || ignoreTimers)
+	// 	{
+	// 		d->state = FAULT_SWITCH_FULL;
+	// 		return true;
+	// 	}
+	// }
+	// else
+	// {
+	// 	d->fault_switch_timer = d->current_time;
+	// }
 
 	// Switch partially open and stopped
-	if(!d->balance_conf.fault_is_dual_switch) {
-		if((d->switch_state == HALF || d->switch_state == OFF) && d->abs_erpm < d->balance_conf.fault_adc_half_erpm){
-			if ((1000.0 * (d->current_time - d->fault_switch_half_timer)) > d->balance_conf.fault_delay_switch_half || ignoreTimers){
-				d->state = FAULT_SWITCH_HALF;
-				return true;
-			}
-		} else {
-			d->fault_switch_half_timer = d->current_time;
-		}
-	}
+	// if (!d->balance_conf.fault_is_dual_switch)
+	// {
+	// 	if ((d->switch_state == HALF || d->switch_state == OFF) && d->abs_erpm < d->balance_conf.fault_adc_half_erpm)
+	// 	{
+	// 		if ((1000.0 * (d->current_time - d->fault_switch_half_timer)) > d->balance_conf.fault_delay_switch_half || ignoreTimers)
+	// 		{
+	// 			d->state = FAULT_SWITCH_HALF;
+	// 			return true;
+	// 		}
+	// 	}
+	// 	else
+	// 	{
+	// 		d->fault_switch_half_timer = d->current_time;
+	// 	}
+	// }
 
 	// Check pitch angle
-	if (fabsf(d->pitch_angle) > d->balance_conf.fault_pitch) {
-		if ((1000.0 * (d->current_time - d->fault_angle_pitch_timer)) > d->balance_conf.fault_delay_pitch || ignoreTimers) {
+	if (fabsf(d->pitch_angle) > d->balance_conf.fault_pitch)
+	{
+		if ((1000.0 * (d->current_time - d->fault_angle_pitch_timer)) > d->balance_conf.fault_delay_pitch || ignoreTimers)
+		{
 			d->state = FAULT_ANGLE_PITCH;
 			return true;
 		}
-	} else {
+	}
+	else
+	{
 		d->fault_angle_pitch_timer = d->current_time;
 	}
 
 	// Check roll angle
-	if (fabsf(d->roll_angle) > d->balance_conf.fault_roll) {
-		if ((1000.0 * (d->current_time - d->fault_angle_roll_timer)) > d->balance_conf.fault_delay_roll || ignoreTimers) {
+	if (fabsf(d->roll_angle) > d->balance_conf.fault_roll)
+	{
+		if ((1000.0 * (d->current_time - d->fault_angle_roll_timer)) > d->balance_conf.fault_delay_roll || ignoreTimers)
+		{
 			d->state = FAULT_ANGLE_ROLL;
 			return true;
 		}
-	} else {
+	}
+	else
+	{
 		d->fault_angle_roll_timer = d->current_time;
 	}
 
 	// Check for duty
-	if (d->abs_duty_cycle > d->balance_conf.fault_duty){
-		if ((1000.0 * (d->current_time - d->fault_duty_timer)) > d->balance_conf.fault_delay_duty || ignoreTimers) {
+	if (d->abs_duty_cycle > d->balance_conf.fault_duty)
+	{
+		if ((1000.0 * (d->current_time - d->fault_duty_timer)) > d->balance_conf.fault_delay_duty || ignoreTimers)
+		{
 			d->state = FAULT_DUTY;
 			return true;
 		}
-	} else {
+	}
+	else
+	{
 		d->fault_duty_timer = d->current_time;
 	}
 
 	return false;
 }
 
-static void calculate_setpoint_target(data *d) {
-	if (d->setpointAdjustmentType == CENTERING && d->setpoint_target_interpolated != d->setpoint_target) {
+static void calculate_setpoint_target(data *d)
+{
+	if (d->setpointAdjustmentType == CENTERING && d->setpoint_target_interpolated != d->setpoint_target)
+	{
 		// Ignore tiltback during centering sequence
 		d->state = RUNNING;
-	} else if (d->abs_duty_cycle > d->balance_conf.tiltback_duty) {
-		if (d->erpm > 0) {
+	}
+	else if (d->abs_duty_cycle > d->balance_conf.tiltback_duty)
+	{
+		if (d->erpm > 0)
+		{
 			d->setpoint_target = d->balance_conf.tiltback_duty_angle;
-		} else {
+		}
+		else
+		{
 			d->setpoint_target = -d->balance_conf.tiltback_duty_angle;
 		}
 		d->setpointAdjustmentType = TILTBACK_DUTY;
 		d->state = RUNNING_TILTBACK_DUTY;
-	} else if (d->abs_duty_cycle > 0.05 && VESC_IF->mc_get_input_voltage_filtered() > d->balance_conf.tiltback_hv) {
-		if (d->erpm > 0){
+	}
+	else if (d->abs_duty_cycle > 0.05 && VESC_IF->mc_get_input_voltage_filtered() > d->balance_conf.tiltback_hv)
+	{
+		if (d->erpm > 0)
+		{
 			d->setpoint_target = d->balance_conf.tiltback_hv_angle;
-		} else {
+		}
+		else
+		{
 			d->setpoint_target = -d->balance_conf.tiltback_hv_angle;
 		}
 
 		d->setpointAdjustmentType = TILTBACK_HV;
 		d->state = RUNNING_TILTBACK_HIGH_VOLTAGE;
-	} else if (d->abs_duty_cycle > 0.05 && VESC_IF->mc_get_input_voltage_filtered() < d->balance_conf.tiltback_lv) {
-		if (d->erpm > 0) {
+	}
+	else if (d->abs_duty_cycle > 0.05 && VESC_IF->mc_get_input_voltage_filtered() < d->balance_conf.tiltback_lv)
+	{
+		if (d->erpm > 0)
+		{
 			d->setpoint_target = d->balance_conf.tiltback_lv_angle;
-		} else {
+		}
+		else
+		{
 			d->setpoint_target = -d->balance_conf.tiltback_lv_angle;
 		}
 
 		d->setpointAdjustmentType = TILTBACK_LV;
 		d->state = RUNNING_TILTBACK_LOW_VOLTAGE;
-	} else {
+	}
+	else
+	{
 		d->setpointAdjustmentType = TILTBACK_NONE;
 		d->setpoint_target = 0;
 		d->state = RUNNING;
 	}
 }
 
-static void calculate_setpoint_interpolated(data *d) {
-	if (d->setpoint_target_interpolated != d->setpoint_target) {
+static void calculate_setpoint_interpolated(data *d)
+{
+	if (d->setpoint_target_interpolated != d->setpoint_target)
+	{
 		// If we are less than one step size away, go all the way
-		if (fabsf(d->setpoint_target - d->setpoint_target_interpolated) < get_setpoint_adjustment_step_size(d)) {
+		if (fabsf(d->setpoint_target - d->setpoint_target_interpolated) < get_setpoint_adjustment_step_size(d))
+		{
 			d->setpoint_target_interpolated = d->setpoint_target;
-		} else if (d->setpoint_target - d->setpoint_target_interpolated > 0) {
+		}
+		else if (d->setpoint_target - d->setpoint_target_interpolated > 0)
+		{
 			d->setpoint_target_interpolated += get_setpoint_adjustment_step_size(d);
-		} else {
+		}
+		else
+		{
 			d->setpoint_target_interpolated -= get_setpoint_adjustment_step_size(d);
 		}
 	}
 }
 
-static void apply_noseangling(data *d){
+static void apply_noseangling(data *d)
+{
 	// Nose angle adjustment, add variable then constant tiltback
 	float noseangling_target = 0;
-	if (fabsf(d->erpm) > d->tiltback_variable_max_erpm) {
+	if (fabsf(d->erpm) > d->tiltback_variable_max_erpm)
+	{
 		noseangling_target = fabsf(d->balance_conf.tiltback_variable_max) * SIGN(d->erpm);
-	} else {
+	}
+	else
+	{
 		noseangling_target = d->tiltback_variable * d->erpm;
 	}
 
-	if (d->erpm > d->balance_conf.tiltback_constant_erpm) {
+	if (d->erpm > d->balance_conf.tiltback_constant_erpm)
+	{
 		noseangling_target += d->balance_conf.tiltback_constant;
-	} else if (d->erpm < -d->balance_conf.tiltback_constant_erpm){
+	}
+	else if (d->erpm < -d->balance_conf.tiltback_constant_erpm)
+	{
 		noseangling_target += -d->balance_conf.tiltback_constant;
 	}
 
-	if (fabsf(noseangling_target - d->noseangling_interpolated) < d->noseangling_step_size) {
+	if (fabsf(noseangling_target - d->noseangling_interpolated) < d->noseangling_step_size)
+	{
 		d->noseangling_interpolated = noseangling_target;
-	} else if (noseangling_target - d->noseangling_interpolated > 0) {
+	}
+	else if (noseangling_target - d->noseangling_interpolated > 0)
+	{
 		d->noseangling_interpolated += d->noseangling_step_size;
-	} else {
+	}
+	else
+	{
 		d->noseangling_interpolated -= d->noseangling_step_size;
 	}
 
 	d->setpoint += d->noseangling_interpolated;
 }
 
-static void apply_torquetilt(data *d) {
+static void apply_torquetilt(data *d)
+{
 	// Filter current (Biquad)
-	if (d->balance_conf.torquetilt_filter > 0) {
+	if (d->balance_conf.torquetilt_filter > 0)
+	{
 		d->torquetilt_filtered_current = biquad_process(&d->torquetilt_current_biquad, d->motor_current);
-	} else {
+	}
+	else
+	{
 		d->torquetilt_filtered_current = d->motor_current;
 	}
 
@@ -413,91 +509,127 @@ static void apply_torquetilt(data *d) {
 	// Then multiply it by "power" to get our desired angle, and min with the limit to respect boundaries.
 	// Finally multiply it by sign motor current to get directionality back
 	d->torquetilt_target = fminf(fmaxf((fabsf(d->torquetilt_filtered_current) - d->balance_conf.torquetilt_start_current), 0) *
-			d->balance_conf.torquetilt_strength, d->balance_conf.torquetilt_angle_limit) * SIGN(d->torquetilt_filtered_current);
+									 d->balance_conf.torquetilt_strength,
+								 d->balance_conf.torquetilt_angle_limit) *
+						   SIGN(d->torquetilt_filtered_current);
 
 	float step_size;
 	if ((d->torquetilt_interpolated - d->torquetilt_target > 0 && d->torquetilt_target > 0) ||
-			(d->torquetilt_interpolated - d->torquetilt_target < 0 && d->torquetilt_target < 0)) {
+		(d->torquetilt_interpolated - d->torquetilt_target < 0 && d->torquetilt_target < 0))
+	{
 		step_size = d->torquetilt_off_step_size;
-	} else {
+	}
+	else
+	{
 		step_size = d->torquetilt_on_step_size;
 	}
 
-	if (fabsf(d->torquetilt_target - d->torquetilt_interpolated) < step_size) {
+	if (fabsf(d->torquetilt_target - d->torquetilt_interpolated) < step_size)
+	{
 		d->torquetilt_interpolated = d->torquetilt_target;
-	} else if (d->torquetilt_target - d->torquetilt_interpolated > 0) {
+	}
+	else if (d->torquetilt_target - d->torquetilt_interpolated > 0)
+	{
 		d->torquetilt_interpolated += step_size;
-	} else {
+	}
+	else
+	{
 		d->torquetilt_interpolated -= step_size;
 	}
 
 	d->setpoint += d->torquetilt_interpolated;
 }
 
-static void apply_turntilt(data *d) {
+static void apply_turntilt(data *d)
+{
 	// Calculate desired angle
 	d->turntilt_target = d->abs_roll_angle_sin * d->balance_conf.turntilt_strength;
 
 	// Apply cutzone
-	if (d->abs_roll_angle < d->balance_conf.turntilt_start_angle) {
+	if (d->abs_roll_angle < d->balance_conf.turntilt_start_angle)
+	{
 		d->turntilt_target = 0;
 	}
 
 	// Disable below erpm threshold otherwise add directionality
-	if (d->abs_erpm < d->balance_conf.turntilt_start_erpm) {
+	if (d->abs_erpm < d->balance_conf.turntilt_start_erpm)
+	{
 		d->turntilt_target = 0;
-	} else {
+	}
+	else
+	{
 		d->turntilt_target *= SIGN(d->erpm);
 	}
 
 	// Apply speed scaling
-	if (d->abs_erpm < d->balance_conf.turntilt_erpm_boost_end) {
+	if (d->abs_erpm < d->balance_conf.turntilt_erpm_boost_end)
+	{
 		d->turntilt_target *= 1 + ((d->balance_conf.turntilt_erpm_boost / 100.0f) *
-				(d->abs_erpm / d->balance_conf.turntilt_erpm_boost_end));
-	} else {
+								   (d->abs_erpm / d->balance_conf.turntilt_erpm_boost_end));
+	}
+	else
+	{
 		d->turntilt_target *= 1 + (d->balance_conf.turntilt_erpm_boost / 100.0f);
 	}
 
 	// Limit angle to max angle
-	if (d->turntilt_target > 0) {
+	if (d->turntilt_target > 0)
+	{
 		d->turntilt_target = fminf(d->turntilt_target, d->balance_conf.turntilt_angle_limit);
-	} else {
+	}
+	else
+	{
 		d->turntilt_target = fmaxf(d->turntilt_target, -d->balance_conf.turntilt_angle_limit);
 	}
 
 	// Move towards target limited by max speed
-	if (fabsf(d->turntilt_target - d->turntilt_interpolated) < d->turntilt_step_size) {
+	if (fabsf(d->turntilt_target - d->turntilt_interpolated) < d->turntilt_step_size)
+	{
 		d->turntilt_interpolated = d->turntilt_target;
-	} else if (d->turntilt_target - d->turntilt_interpolated > 0) {
+	}
+	else if (d->turntilt_target - d->turntilt_interpolated > 0)
+	{
 		d->turntilt_interpolated += d->turntilt_step_size;
-	} else {
+	}
+	else
+	{
 		d->turntilt_interpolated -= d->turntilt_step_size;
 	}
 
 	d->setpoint += d->turntilt_interpolated;
 }
 
-static float apply_deadzone(data *d, float error){
-	if (d->balance_conf.deadzone == 0) {
+static float apply_deadzone(data *d, float error)
+{
+	if (d->balance_conf.deadzone == 0)
+	{
 		return error;
 	}
 
-	if (error < d->balance_conf.deadzone && error > -d->balance_conf.deadzone) {
+	if (error < d->balance_conf.deadzone && error > -d->balance_conf.deadzone)
+	{
 		return 0;
-	} else if(error > d->balance_conf.deadzone) {
+	}
+	else if (error > d->balance_conf.deadzone)
+	{
 		return error - d->balance_conf.deadzone;
-	} else {
+	}
+	else
+	{
 		return error + d->balance_conf.deadzone;
 	}
 }
 
-static void brake(data *d) {
+static void brake(data *d)
+{
 	// Brake timeout logic
-	if (d->balance_conf.brake_timeout > 0 && (d->abs_erpm > 1 || d->brake_timeout == 0)) {
+	if (d->balance_conf.brake_timeout > 0 && (d->abs_erpm > 1 || d->brake_timeout == 0))
+	{
 		d->brake_timeout = d->current_time + d->balance_conf.brake_timeout;
 	}
 
-	if (d->brake_timeout != 0 && d->current_time > d->brake_timeout) {
+	if (d->brake_timeout != 0 && d->current_time > d->brake_timeout)
+	{
 		return;
 	}
 
@@ -507,21 +639,28 @@ static void brake(data *d) {
 	// Set current
 	VESC_IF->mc_set_brake_current(d->balance_conf.brake_current);
 
-	if (d->balance_conf.multi_esc) {
-		for (int i = 0;i < MAX_CAN_DEVS;i++) {
+	if (d->balance_conf.multi_esc)
+	{
+		for (int i = 0; i < MAX_CAN_DEVS; i++)
+		{
 			can_status_msg *msg = VESC_IF->can_get_status_msg_index(i);
-			if (msg->id >= 0 && VESC_IF->ts_to_age_s(msg->rx_time) < MAX_CAN_AGE) {
+			if (msg->id >= 0 && VESC_IF->ts_to_age_s(msg->rx_time) < MAX_CAN_AGE)
+			{
 				VESC_IF->can_set_current_brake(msg->id, d->balance_conf.brake_current);
 			}
 		}
 	}
 }
 
-static void set_current(data *d, float current, float yaw_current){
+static void set_current(data *d, float current, float yaw_current)
+{
 	// Limit current output to configured max output (does not account for yaw_current)
-	if (current > 0 && current > VESC_IF->get_cfg_float(CFG_PARAM_l_current_max)) {
+	if (current > 0 && current > VESC_IF->get_cfg_float(CFG_PARAM_l_current_max))
+	{
 		current = VESC_IF->get_cfg_float(CFG_PARAM_l_current_max);
-	} else if(current < 0 && current < VESC_IF->get_cfg_float(CFG_PARAM_l_current_min)) {
+	}
+	else if (current < 0 && current < VESC_IF->get_cfg_float(CFG_PARAM_l_current_min))
+	{
 		current = VESC_IF->get_cfg_float(CFG_PARAM_l_current_min);
 	}
 
@@ -529,7 +668,8 @@ static void set_current(data *d, float current, float yaw_current){
 	VESC_IF->timeout_reset();
 
 	// Set current
-	if (d->balance_conf.multi_esc) {
+	if (d->balance_conf.multi_esc)
+	{
 		// Set the current delay
 		VESC_IF->mc_set_current_off_delay(d->motor_timeout_seconds);
 
@@ -537,15 +677,19 @@ static void set_current(data *d, float current, float yaw_current){
 		VESC_IF->mc_set_current(current + yaw_current);
 
 		// Can bus
-		for (int i = 0;i < MAX_CAN_DEVS;i++) {
+		for (int i = 0; i < MAX_CAN_DEVS; i++)
+		{
 			can_status_msg *msg = VESC_IF->can_get_status_msg_index(i);
 
-			if (msg->id >= 0 && VESC_IF->ts_to_age_s(msg->rx_time) < MAX_CAN_AGE) {
+			if (msg->id >= 0 && VESC_IF->ts_to_age_s(msg->rx_time) < MAX_CAN_AGE)
+			{
 				// Assume 2 motors, i don't know how to steer 3 anyways
 				VESC_IF->can_set_current_off_delay(msg->id, current - yaw_current, d->motor_timeout_seconds);
 			}
 		}
-	} else {
+	}
+	else
+	{
 		// Set the current delay
 		VESC_IF->mc_set_current_off_delay(d->motor_timeout_seconds);
 		// Set Current
@@ -553,13 +697,30 @@ static void set_current(data *d, float current, float yaw_current){
 	}
 }
 
-static void balance_thd(void *arg) {
-	data *d = (data*)arg;
+static float get_throttle_current(data *d)
+{
+	if (d->external_throttle > 0)
+	{
+		return d->external_throttle * VESC_IF->get_cfg_float(CFG_PARAM_l_current_max);
+	}
+	else if (d->external_throttle < 0)
+	{
+		return d->external_throttle * VESC_IF->get_cfg_float(CFG_PARAM_l_current_min);
+	}
 
-	while (!VESC_IF->should_terminate()) {
+	return 0;
+}
+
+static void balance_thd(void *arg)
+{
+	data *d = (data *)arg;
+
+	while (!VESC_IF->should_terminate())
+	{
 		// Update times
 		d->current_time = VESC_IF->system_time();
-		if (d->last_time == 0) {
+		if (d->last_time == 0)
+		{
 			d->last_time = d->current_time;
 		}
 
@@ -567,7 +728,8 @@ static void balance_thd(void *arg) {
 		d->filtered_diff_time = 0.03 * d->diff_time + 0.97 * d->filtered_diff_time; // Purely a metric
 		d->last_time = d->current_time;
 
-		if (d->balance_conf.loop_time_filter > 0) {
+		if (d->balance_conf.loop_time_filter > 0)
+		{
 			d->loop_overshoot = d->diff_time - (d->loop_time_seconds - roundf(d->filtered_loop_overshoot));
 			d->filtered_loop_overshoot = d->loop_overshoot_alpha * d->loop_overshoot + (1.0 - d->loop_overshoot_alpha) * d->filtered_loop_overshoot;
 		}
@@ -590,12 +752,16 @@ static void balance_thd(void *arg) {
 		d->abs_duty_cycle = fabsf(d->duty_cycle);
 		d->erpm = VESC_IF->mc_get_rpm();
 		d->abs_erpm = fabsf(d->erpm);
-		if (d->balance_conf.multi_esc) {
+		if (d->balance_conf.multi_esc)
+		{
 			d->avg_erpm = d->erpm;
-			for (int i = 0;i < MAX_CAN_DEVS;i++) {
+			for (int i = 0; i < MAX_CAN_DEVS; i++)
+			{
 				can_status_msg *msg = VESC_IF->can_get_status_msg_index(i);
-				if (msg->id >= 0 && VESC_IF->ts_to_age_s(msg->rx_time) < MAX_CAN_AGE) {
+				if (msg->id >= 0 && VESC_IF->ts_to_age_s(msg->rx_time) < MAX_CAN_AGE)
+				{
 					d->avg_erpm += msg->rpm;
+					d->other_vesc_id = msg->id;
 				}
 			}
 
@@ -604,56 +770,81 @@ static void balance_thd(void *arg) {
 
 		d->adc1 = VESC_IF->io_read_analog(VESC_PIN_ADC1);
 		d->adc2 = VESC_IF->io_read_analog(VESC_PIN_ADC2); // Returns -1.0 if the pin is missing on the hardware
-		if (d->adc2 < 0.0) {
+		if (d->adc2 < 0.0)
+		{
 			d->adc2 = 0.0;
 		}
 
 		// Calculate switch state from ADC values
-		if (d->balance_conf.fault_adc1 == 0 && d->balance_conf.fault_adc2 == 0){ // No Switch
+		if (d->balance_conf.fault_adc1 == 0 && d->balance_conf.fault_adc2 == 0)
+		{ // No Switch
 			d->switch_state = ON;
-		} else if (d->balance_conf.fault_adc2 == 0) { // Single switch on ADC1
-			if (d->adc1 > d->balance_conf.fault_adc1) {
+		}
+		else if (d->balance_conf.fault_adc2 == 0)
+		{ // Single switch on ADC1
+			if (d->adc1 > d->balance_conf.fault_adc1)
+			{
 				d->switch_state = ON;
-			} else {
+			}
+			else
+			{
 				d->switch_state = OFF;
 			}
-		} else if (d->balance_conf.fault_adc1 == 0) { // Single switch on ADC2
-			if (d->adc2 > d->balance_conf.fault_adc2) {
+		}
+		else if (d->balance_conf.fault_adc1 == 0)
+		{ // Single switch on ADC2
+			if (d->adc2 > d->balance_conf.fault_adc2)
+			{
 				d->switch_state = ON;
-			} else {
+			}
+			else
+			{
 				d->switch_state = OFF;
 			}
-		} else { // Double switch
-			if (d->adc1 > d->balance_conf.fault_adc1 && d->adc2 > d->balance_conf.fault_adc2) {
+		}
+		else
+		{ // Double switch
+			if (d->adc1 > d->balance_conf.fault_adc1 && d->adc2 > d->balance_conf.fault_adc2)
+			{
 				d->switch_state = ON;
-			} else if (d->adc1 > d->balance_conf.fault_adc1 || d->adc2 > d->balance_conf.fault_adc2) {
-				if (d->balance_conf.fault_is_dual_switch) {
+			}
+			else if (d->adc1 > d->balance_conf.fault_adc1 || d->adc2 > d->balance_conf.fault_adc2)
+			{
+				if (d->balance_conf.fault_is_dual_switch)
+				{
 					d->switch_state = ON;
-				} else {
+				}
+				else
+				{
 					d->switch_state = HALF;
 				}
-			} else {
+			}
+			else
+			{
 				d->switch_state = OFF;
 			}
 		}
 
 		// Control Loop State Logic
-		switch(d->state) {
+		switch (d->state)
+		{
 		case (STARTUP):
-				// Disable output
-				brake(d);
-				if (VESC_IF->imu_startup_done()) {
-					reset_vars(d);
-					d->state = FAULT_STARTUP; // Trigger a fault so we need to meet start conditions to start
-				}
-				break;
+			// Disable output
+			brake(d);
+			if (VESC_IF->imu_startup_done())
+			{
+				reset_vars(d);
+				d->state = FAULT_STARTUP; // Trigger a fault so we need to meet start conditions to start
+			}
+			break;
 
 		case (RUNNING):
 		case (RUNNING_TILTBACK_DUTY):
 		case (RUNNING_TILTBACK_HIGH_VOLTAGE):
 		case (RUNNING_TILTBACK_LOW_VOLTAGE):
 			// Check for faults
-			if (check_faults(d, false)) {
+			if (check_faults(d, false))
+			{
 				break;
 			}
 
@@ -676,61 +867,63 @@ static void balance_thd(void *arg) {
 			d->derivative = d->last_pitch_angle - d->pitch_angle;
 
 			// Apply I term Filter
-			if (d->balance_conf.ki_limit > 0 && fabsf(d->integral * d->balance_conf.ki) > d->balance_conf.ki_limit) {
+			if (d->balance_conf.ki_limit > 0 && fabsf(d->integral * d->balance_conf.ki) > d->balance_conf.ki_limit)
+			{
 				d->integral = d->balance_conf.ki_limit / d->balance_conf.ki * SIGN(d->integral);
 			}
 
 			// Apply D term filters
-			if (d->balance_conf.kd_pt1_lowpass_frequency > 0) {
+			if (d->balance_conf.kd_pt1_lowpass_frequency > 0)
+			{
 				d->d_pt1_lowpass_state = d->d_pt1_lowpass_state + d->d_pt1_lowpass_k * (d->derivative - d->d_pt1_lowpass_state);
 				d->derivative = d->d_pt1_lowpass_state;
 			}
 
-			if (d->balance_conf.kd_pt1_highpass_frequency > 0){
+			if (d->balance_conf.kd_pt1_highpass_frequency > 0)
+			{
 				d->d_pt1_highpass_state = d->d_pt1_highpass_state + d->d_pt1_highpass_k * (d->derivative - d->d_pt1_highpass_state);
 				d->derivative = d->derivative - d->d_pt1_highpass_state;
 			}
 
 			d->pid_value = (d->balance_conf.kp * d->proportional) + (d->balance_conf.ki * d->integral) + (d->balance_conf.kd * d->derivative);
 
-			if (d->balance_conf.pid_mode == BALANCE_PID_MODE_ANGLE_RATE_CASCADE) {
+			if (d->balance_conf.pid_mode == BALANCE_PID_MODE_ANGLE_RATE_CASCADE)
+			{
 				d->proportional2 = d->pid_value - d->gyro[1];
 				d->integral2 = d->integral2 + d->proportional2;
 				d->derivative2 = d->last_gyro_y - d->gyro[1];
 
 				// Apply I term Filter
-				if (d->balance_conf.ki_limit > 0 && fabsf(d->integral2 * d->balance_conf.ki2) > d->balance_conf.ki_limit) {
+				if (d->balance_conf.ki_limit > 0 && fabsf(d->integral2 * d->balance_conf.ki2) > d->balance_conf.ki_limit)
+				{
 					d->integral2 = d->balance_conf.ki_limit / d->balance_conf.ki2 * SIGN(d->integral2);
 				}
 
 				d->pid_value = (d->balance_conf.kp2 * d->proportional2) +
-						(d->balance_conf.ki2 * d->integral2) + (d->balance_conf.kd2 * d->derivative2);
+							   (d->balance_conf.ki2 * d->integral2) + (d->balance_conf.kd2 * d->derivative2);
 			}
 
 			d->last_proportional = d->proportional;
 
 			// Apply Booster
 			d->abs_proportional = fabsf(d->proportional);
-			if (d->abs_proportional > d->balance_conf.booster_angle) {
-				if (d->abs_proportional - d->balance_conf.booster_angle < d->balance_conf.booster_ramp) {
+			if (d->abs_proportional > d->balance_conf.booster_angle)
+			{
+				if (d->abs_proportional - d->balance_conf.booster_angle < d->balance_conf.booster_ramp)
+				{
 					d->pid_value += (d->balance_conf.booster_current * SIGN(d->proportional)) *
-							((d->abs_proportional - d->balance_conf.booster_angle) / d->balance_conf.booster_ramp);
-				} else {
+									((d->abs_proportional - d->balance_conf.booster_angle) / d->balance_conf.booster_ramp);
+				}
+				else
+				{
 					d->pid_value += d->balance_conf.booster_current * SIGN(d->proportional);
 				}
 			}
 
-			if (d->balance_conf.multi_esc) {
+			if (d->balance_conf.multi_esc)
+			{
 				// Calculate setpoint
-				if (d->abs_duty_cycle < .02) {
-					d->yaw_setpoint = 0;
-				} else if (d->avg_erpm < 0) {
-					d->yaw_setpoint = (-d->balance_conf.roll_steer_kp * d->roll_angle) +
-							(d->balance_conf.roll_steer_erpm_kp * d->roll_angle * d->avg_erpm);
-				} else {
-					d->yaw_setpoint = (d->balance_conf.roll_steer_kp * d->roll_angle) +
-							(d->balance_conf.roll_steer_erpm_kp * d->roll_angle * d->avg_erpm);
-				}
+				d->yaw_setpoint = 0;
 
 				// Do PID maths
 				d->yaw_proportional = d->yaw_setpoint - d->gyro[2];
@@ -738,19 +931,26 @@ static void balance_thd(void *arg) {
 				d->yaw_derivative = d->yaw_proportional - d->yaw_last_proportional;
 
 				d->yaw_pid_value = (d->balance_conf.yaw_kp * d->yaw_proportional) +
-						(d->balance_conf.yaw_ki * d->yaw_integral) + (d->balance_conf.yaw_kd * d->yaw_derivative);
+								   (d->balance_conf.yaw_ki * d->yaw_integral) + (d->balance_conf.yaw_kd * d->yaw_derivative);
 
-				if (d->yaw_pid_value > d->balance_conf.yaw_current_clamp) {
+				if (d->yaw_pid_value > d->balance_conf.yaw_current_clamp)
+				{
 					d->yaw_pid_value = d->balance_conf.yaw_current_clamp;
-				} else if (d->yaw_pid_value < -d->balance_conf.yaw_current_clamp) {
+				}
+				else if (d->yaw_pid_value < -d->balance_conf.yaw_current_clamp)
+				{
 					d->yaw_pid_value = -d->balance_conf.yaw_current_clamp;
 				}
 
 				d->yaw_last_proportional = d->yaw_proportional;
 			}
 
+			// Add balance effect multiplier
+			d->pid_value *= d->balance_effect_multiplier;
+			d->yaw_pid_value *= d->balance_effect_multiplier;
+
 			// Output to motor
-			set_current(d, d->pid_value, d->yaw_pid_value);
+			set_current(d, d->pid_value + get_throttle_current(d), d->yaw_pid_value);
 			break;
 
 		case (FAULT_ANGLE_PITCH):
@@ -760,7 +960,8 @@ static void balance_thd(void *arg) {
 		case (FAULT_STARTUP):
 			// Check for valid startup position and switch state
 			if (fabsf(d->pitch_angle) < d->balance_conf.startup_pitch_tolerance &&
-					fabsf(d->roll_angle) < d->balance_conf.startup_roll_tolerance && d->switch_state == ON) {
+				fabsf(d->roll_angle) < d->balance_conf.startup_roll_tolerance && d->switch_state == ON)
+			{
 				reset_vars(d);
 				break;
 			}
@@ -781,61 +982,82 @@ static void balance_thd(void *arg) {
 		}
 
 		// Debug outputs
-//		app_balance_sample_debug();
-//		app_balance_experiment();
+		//		app_balance_sample_debug();
+		//		app_balance_experiment();
 
 		// Delay between loops
 		VESC_IF->sleep_us((uint32_t)((d->loop_time_seconds - roundf(d->filtered_loop_overshoot)) * 1000000.0));
 	}
 }
 
-static float app_balance_get_debug(int index) {
-	data *d = (data*)ARG;
+static bool can_eid_callback(uint32_t id, uint8_t *data, uint8_t len)
+{
+	data *d = (data *)ARG;
 
-	switch(index){
-		case(1):
-			return d->motor_position;
-		case(2):
-			return d->setpoint;
-		case(3):
-			return d->torquetilt_filtered_current;
-		case(4):
-			return d->derivative;
-		case(5):
-			return d->last_pitch_angle - d->pitch_angle;
-		case(6):
-			return d->motor_current;
-		case(7):
-			return d->erpm;
-		case(8):
-			return d->abs_erpm;
-		case(9):
-			return d->loop_time_seconds;
-		case(10):
-			return d->diff_time;
-		case(11):
-			return d->loop_overshoot;
-		case(12):
-			return d->filtered_loop_overshoot;
-		case(13):
-			return d->filtered_diff_time;
-		case(14):
-			return d->integral;
-		case(15):
-			return d->integral * d->balance_conf.ki;
-		case(16):
-			return d->integral2;
-		case(17):
-			return d->integral2 * d->balance_conf.ki2;
-		default:
-			return 0;
+	//First 4 bytes are the external throttle value as a float
+	//next 4 bytes are the balance effect multiplier as a float
+	if (id == d->other_vesc_id)
+	{
+		if (len == 8)
+		{
+			memcpy(&d->external_throttle, data, 4);
+			memcpy(&d->balance_effect_multiplier, data + 4, 4);
+			return true;
+		}
+	}
+	return false;
+}
+
+static float app_balance_get_debug(int index)
+{
+	data *d = (data *)ARG;
+
+	switch (index)
+	{
+	case (1):
+		return d->motor_position;
+	case (2):
+		return d->setpoint;
+	case (3):
+		return d->torquetilt_filtered_current;
+	case (4):
+		return d->derivative;
+	case (5):
+		return d->last_pitch_angle - d->pitch_angle;
+	case (6):
+		return d->motor_current;
+	case (7):
+		return d->erpm;
+	case (8):
+		return d->abs_erpm;
+	case (9):
+		return d->loop_time_seconds;
+	case (10):
+		return d->diff_time;
+	case (11):
+		return d->loop_overshoot;
+	case (12):
+		return d->filtered_loop_overshoot;
+	case (13):
+		return d->filtered_diff_time;
+	case (14):
+		return d->integral;
+	case (15):
+		return d->integral * d->balance_conf.ki;
+	case (16):
+		return d->integral2;
+	case (17):
+		return d->integral2 * d->balance_conf.ki2;
+	default:
+		return 0;
 	}
 }
 
-static void send_realtime_data(data *d){
+static void send_realtime_data(data *d)
+{
 	int32_t ind = 0;
 	uint8_t send_buffer[50];
-//	send_buffer[ind++] = COMM_GET_DECODED_BALANCE;
+	//	send_buffer[ind++] = COMM_GET_DECODED_BALANCE;
 	buffer_append_float32_auto(send_buffer, d->pid_value, &ind);
 	buffer_append_float32_auto(send_buffer, d->pitch_angle, &ind);
 	buffer_append_float32_auto(send_buffer, d->roll_angle, &ind);
@@ -851,22 +1073,29 @@ static void send_realtime_data(data *d){
 }
 
 // Handler for incoming app commands
-static void on_command_recieved(unsigned char *buffer, unsigned int len) {
-	data *d = (data*)ARG;
+static void on_command_recieved(unsigned char *buffer, unsigned int len)
+{
+	data *d = (data *)ARG;
 
-	if(len > 0){
+	if (len > 0)
+	{
 		uint8_t command = buffer[0];
-		if(command == 0x01){
+		if (command == 0x01)
+		{
 			send_realtime_data(d);
-		}else{
+		}
+		else
+		{
 			VESC_IF->printf("Unknown command received %d", command);
 		}
 	}
 }
 
 // Register get_debug as a lisp extension
-static lbm_value ext_bal_dbg(lbm_value *args, lbm_uint argn) {
-	if (argn != 1 || !VESC_IF->lbm_is_number(args[0])) {
+static lbm_value ext_bal_dbg(lbm_value *args, lbm_uint argn)
+{
+	if (argn != 1 || !VESC_IF->lbm_is_number(args[0]))
+	{
 		return VESC_IF->lbm_enc_sym_eerror;
 	}
 
@@ -875,13 +1104,15 @@ static lbm_value ext_bal_dbg(lbm_value *args, lbm_uint argn) {
 
 // These functions are used to send the config page to VESC Tool
 // and to make persistent read and write work
-static int get_cfg(uint8_t *buffer, bool is_default) {
-	data *d = (data*)ARG;
+static int get_cfg(uint8_t *buffer, bool is_default)
+{
+	data *d = (data *)ARG;
 	balance_config *cfg = VESC_IF->malloc(sizeof(balance_config));
 
 	*cfg = d->balance_conf;
 
-	if (is_default) {
+	if (is_default)
+	{
 		confparser_set_defaults_balance_config(cfg);
 	}
 
@@ -891,20 +1122,24 @@ static int get_cfg(uint8_t *buffer, bool is_default) {
 	return res;
 }
 
-static bool set_cfg(uint8_t *buffer) {
-	data *d = (data*)ARG;
+static bool set_cfg(uint8_t *buffer)
+{
+	data *d = (data *)ARG;
 	bool res = confparser_deserialize_balance_config(buffer, &(d->balance_conf));
 
 	// Store to EEPROM
-	if (res) {
+	if (res)
+	{
 		uint32_t ints = sizeof(balance_config) / 4 + 1;
 		uint32_t *buffer = VESC_IF->malloc(ints * sizeof(uint32_t));
 		bool write_ok = true;
 		memcpy(buffer, &(d->balance_conf), sizeof(balance_config));
-		for (uint32_t i = 0;i < ints;i++) {
+		for (uint32_t i = 0; i < ints; i++)
+		{
 			eeprom_var v;
 			v.as_u32 = buffer[i];
-			if (!VESC_IF->store_eeprom_var(&v, i + 1)) {
+			if (!VESC_IF->store_eeprom_var(&v, i + 1))
+			{
 				write_ok = false;
 				break;
 			}
@@ -912,7 +1147,8 @@ static bool set_cfg(uint8_t *buffer) {
 
 		VESC_IF->free(buffer);
 
-		if (write_ok) {
+		if (write_ok)
+		{
 			eeprom_var v;
 			v.as_u32 = BALANCE_CONFIG_SIGNATURE;
 			VESC_IF->store_eeprom_var(&v, 0);
@@ -924,7 +1160,8 @@ static bool set_cfg(uint8_t *buffer) {
 	return res;
 }
 
-static int get_cfg_xml(uint8_t **buffer) {
+static int get_cfg_xml(uint8_t **buffer)
+{
 	// Note: As the address of data_balance_config_ is not known
 	// at compile time it will be relative to where it is in the
 	// linked binary. Therefore we add PROG_ADDR to it so that it
@@ -934,8 +1171,9 @@ static int get_cfg_xml(uint8_t **buffer) {
 }
 
 // Called when code is stopped
-static void stop(void *arg) {
-	data *d = (data*)arg;
+static void stop(void *arg)
+{
+	data *d = (data *)arg;
 	VESC_IF->set_app_data_handler(NULL);
 	VESC_IF->conf_custom_clear_configs();
 	VESC_IF->request_terminate(d->thread);
@@ -943,13 +1181,15 @@ static void stop(void *arg) {
 	VESC_IF->free(d);
 }
 
-INIT_FUN(lib_info *info) {
+INIT_FUN(lib_info *info)
+{
 	INIT_START
 
 	data *d = VESC_IF->malloc(sizeof(data));
 	memset(d, 0, sizeof(data));
-	
-	if (!d) {
+
+	if (!d)
+	{
 		VESC_IF->printf("Out of memory!");
 		return false;
 	}
@@ -959,30 +1199,40 @@ INIT_FUN(lib_info *info) {
 	uint32_t ints = sizeof(balance_config) / 4 + 1;
 	uint32_t *buffer = VESC_IF->malloc(ints * sizeof(uint32_t));
 	bool read_ok = VESC_IF->read_eeprom_var(&v, 0);
-	if (read_ok && v.as_u32 == BALANCE_CONFIG_SIGNATURE) {
-		for (uint32_t i = 0;i < ints;i++) {
-			if (!VESC_IF->read_eeprom_var(&v, i + 1)) {
+	if (read_ok && v.as_u32 == BALANCE_CONFIG_SIGNATURE)
+	{
+		for (uint32_t i = 0; i < ints; i++)
+		{
+			if (!VESC_IF->read_eeprom_var(&v, i + 1))
+			{
 				read_ok = false;
 				break;
 			}
 			buffer[i] = v.as_u32;
 		}
-	} else {
+	}
+	else
+	{
 		read_ok = false;
 	}
-	
-	if (read_ok) {
+
+	if (read_ok)
+	{
 		memcpy(&(d->balance_conf), buffer, sizeof(balance_config));
-	} else {
+	}
+	else
+	{
 		confparser_set_defaults_balance_config(&(d->balance_conf));
 	}
-	
+
 	VESC_IF->free(buffer);
 
-	info->stop_fun = stop;	
+	info->stop_fun = stop;
 	info->arg = d;
-	
+
 	VESC_IF->conf_custom_add_config(get_cfg, set_cfg, get_cfg_xml);
+
+	VESC_IF->can_set_eid_cb(can_eid_callback);
 
 	configure(d);
 
@@ -993,4 +1243,3 @@ INIT_FUN(lib_info *info) {
 
 	return true;
 }
-
